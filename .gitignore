@@ -1,0 +1,10 @@
+build/
+*.pro.user
+*.user
+*.user.*
+*.autosave
+.qtc_clangd/
+*.qmlc
+*.jsc
+.DS_Store
+Thumbs.db
