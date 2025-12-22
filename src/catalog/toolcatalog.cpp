@@ -1,6 +1,6 @@
 ﻿#include "toolcatalog.h"
 
-ToolCatalog &ToolCatalog::instance()
+static ToolCatalog &instance()
 {
     static ToolCatalog catalog;
     return catalog;
@@ -70,5 +70,5 @@ This is a course design project. All code must be explainable in defense.
 
 const CatalogItem *ToolCatalog::root()
 {
-    return ToolCatalog::instance().root_;
+    return instance().root_;
 }
