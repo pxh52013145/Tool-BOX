@@ -2,7 +2,7 @@
 
 #include "core/database.h"
 #include "core/logging.h"
-#include "pages/homepage.h"
+#include "pages/translatorpage.h"
 
 #include <QAction>
 #include <QApplication>
@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QSystemTrayIcon>
+#include <QTabWidget>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
@@ -44,8 +45,14 @@ void MainWindow::setupUi()
     setWindowTitle("Toolbox");
     resize(980, 720);
 
-    auto *home = new HomePage(this);
-    setCentralWidget(home);
+    auto *tabs = new QTabWidget(this);
+    setCentralWidget(tabs);
+
+    translatorPage_ = new TranslatorPage(tabs);
+    tabs->addTab(translatorPage_, "翻译");
+
+    auto *placeholder = new QWidget(tabs);
+    tabs->addTab(placeholder, "密码（开发中）");
 }
 
 void MainWindow::setupTray()

@@ -11,7 +11,3 @@ build/
 *.log
 .DS_Store
 Thumbs.db
-
-# reference (web demo) local env
-.env.local
-reference/.env.local
