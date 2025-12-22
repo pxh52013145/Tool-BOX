@@ -5,8 +5,6 @@
 
 class QSystemTrayIcon;
 
-class TranslatorPage;
-
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
@@ -24,7 +22,6 @@ private:
     void ensureInfrastructure();
 
     QSystemTrayIcon *trayIcon_ = nullptr;
-    TranslatorPage *translatorPage_ = nullptr;
     bool trayEnabled_ = true;
 };
 

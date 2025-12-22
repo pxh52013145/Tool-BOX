@@ -12,7 +12,12 @@ DEPENDPATH += $$PWD/src
 SOURCES += \
     src/main.cpp \
     src/mainwindow.cpp \
+    src/pages/homepage.cpp \
     src/pages/translatorpage.cpp \
+    src/catalog/toolcatalog.cpp \
+    src/catalog/folderlistmodel.cpp \
+    src/ui/cassettetheme.cpp \
+    src/ui/scanlineoverlay.cpp \
     src/translate/mocktranslateprovider.cpp \
     src/translate/mymemorytranslateprovider.cpp \
     src/translate/translateservice.cpp \
@@ -23,7 +28,12 @@ SOURCES += \
 
 HEADERS += \
     src/mainwindow.h \
+    src/pages/homepage.h \
     src/pages/translatorpage.h \
+    src/catalog/toolcatalog.h \
+    src/catalog/folderlistmodel.h \
+    src/ui/cassettetheme.h \
+    src/ui/scanlineoverlay.h \
     src/translate/translateprovider.h \
     src/translate/mocktranslateprovider.h \
     src/translate/mymemorytranslateprovider.h \
