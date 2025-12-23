@@ -1,36 +1,31 @@
-﻿# Password Manager 方案细化（草案）
+# Password Manager 模块（已落地）
 
-## 1. MVP 功能清单
-- Vault：主密码解锁/锁定、自动锁定、基本设置项。
-- 条目管理：新增/编辑/删除登录条目，搜索、标签、最近使用。
-- 导入：Chrome/Edge/Firefox 官方 CSV（先覆盖最常见字段）。
-- 填充（网页）：浏览器扩展检测登录表单 → 桌面端返回候选账号 → 扩展填充。
-- 保存/更新：扩展捕获提交 → 桌面端弹窗确认 → 写入 Vault。
+本模块对应任务书题目「个人密码管理器（数据库 + 加密 + 文件操作）」的核心功能：账号密码安全存储、加密保护、按类别过滤、加密备份导入导出。
 
-## 2. Vault 设计（建议落地版）
-- 文件：`vault.dat`
-- Header：magic/version/kdf params/salt
-- Payload：加密后的 JSON 或 protobuf（先 JSON，后续可换）
-- 加密：
-  - KDF：Argon2id（参数可配置，保存到 header）
-  - AEAD：XChaCha20-Poly1305（nonce 随机）
-- 运行时：
-  - 仅在解锁后把明文解密到内存（尽量短生命周期）
-  - UI 列表使用脱敏字段（username/origin），密码需要二次动作才解密
+## 1. 已实现功能
+- Vault：首次设置主密码；解锁/锁定；5 分钟无操作自动锁定；修改主密码会对所有条目重新加密。
+- 条目管理：新增/编辑/删除；搜索；按分类过滤；复制账号/复制密码（复制密码二次确认，15 秒后自动清空剪贴板）。
+- 数据持久化：SQLite 存储；密码与备注字段加密后写入数据库。
+- 备份/恢复：导出/导入加密备份文件（`.tbxpm`）。
 
-## 3. 浏览器扩展对接（推荐协议形态）
+## 2. 关键 Qt 模块覆盖
+- 数据库：`QtSql` + SQLite（增删改查）。
+- Model/View：`QTableView` + 自定义 `QAbstractTableModel` + `QSortFilterProxyModel`。
+- 文件操作：备份文件的读写（`QFileDialog` / `QSaveFile` / JSON）。
 
-### 3.1 消息类型（示例）
-- `FormDetected`：`{origin, url, title, fields:{hasUsername, hasPassword}}`
-- `QueryLogins`：`{origin}` → 返回 `[{id, username, displayName}]`
-- `RequestFill`：`{itemId}` → 返回 `{username, password}`（建议带一次性 token 与短 TTL）
-- `FormSubmitted`：`{origin, username, password, isUpdateHint}`
+## 3. 数据库设计
+- `vault_meta`：保存 KDF 参数与主密码校验值（`id=1` 单行）。
+- `password_entries`：保存条目基本信息（明文）与机密字段（密文）：
+  - 明文：`title/username/url/category`、时间戳
+  - 密文：`password_enc/notes_enc`
 
-### 3.2 安全要点
-- 扩展与桌面端绑定：首次配对（随机 clientId/共享密钥）避免被其他进程伪造。
-- 密码解密“尽量晚”：只在用户确认填充时才返回明文。
-- 关键动作二次确认：保存/更新、复制密码、导出。
+## 4. 加密设计（课程项目落地版）
+- KDF：PBKDF2-SHA256（默认 `iterations=120000`，`salt=16 bytes`，`key=32 bytes`）。
+- 加密/校验：基于 HMAC-SHA256 生成密钥流（异或加密）+ HMAC 校验（tag 截断为 16 bytes）。
+- 备注：这是课程设计的实现方案，目的是满足“加密存储 + 可演示”的要求，并非专业密码学库的替代品。
 
-## 4. UI/交互建议
-- 登录框附近的小弹窗：桌面端很难精确定位网页控件；建议由扩展在网页内渲染 UI，桌面端只负责返回候选数据与策略判断。
-- 桌面端弹窗：保存/更新提示、冲突处理（同站点多账号）。
+## 5. 代码位置
+- Vault/加密：`src/password/passwordvault.*`、`src/core/crypto.*`
+- 数据访问：`src/password/passwordrepository.*`
+- 列表模型：`src/password/passwordentrymodel.*`
+- UI：`src/pages/passwordmanagerpage.*`、`src/pages/passwordentrydialog.*`
