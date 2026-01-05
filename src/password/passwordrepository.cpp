@@ -1,12 +1,13 @@
 #include "passwordrepository.h"
 
 #include "core/crypto.h"
-#include "core/database.h"
+#include "passworddatabase.h"
 #include "passwordvault.h"
 
 #include <QDateTime>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSet>
 
 namespace {
 
@@ -20,6 +21,90 @@ qint64 normalizeTs(qint64 ts, qint64 fallback)
     if (ts <= 0)
         return fallback;
     return ts;
+}
+
+QStringList normalizeTags(const QStringList &tags)
+{
+    QStringList out;
+    QSet<QString> seen;
+
+    for (const auto &tag : tags) {
+        const auto trimmed = tag.trimmed();
+        if (trimmed.isEmpty())
+            continue;
+
+        const auto key = trimmed.toLower();
+        if (seen.contains(key))
+            continue;
+
+        seen.insert(key);
+        out.push_back(trimmed);
+    }
+
+    return out;
+}
+
+bool replaceEntryTags(QSqlDatabase &database, qint64 entryId, const QStringList &tags, QString &errorOut)
+{
+    QSqlQuery del(database);
+    del.prepare(R"sql(
+        DELETE FROM entry_tags WHERE entry_id = ?
+    )sql");
+    del.addBindValue(entryId);
+    if (!del.exec()) {
+        errorOut = QString("清空标签关联失败：%1").arg(del.lastError().text());
+        return false;
+    }
+
+    if (tags.isEmpty())
+        return true;
+
+    const auto now = QDateTime::currentDateTime().toSecsSinceEpoch();
+
+    for (const auto &tag : tags) {
+        QSqlQuery insertTag(database);
+        insertTag.prepare(R"sql(
+            INSERT OR IGNORE INTO tags(name, created_at, updated_at)
+            VALUES(?, ?, ?)
+        )sql");
+        insertTag.addBindValue(tag);
+        insertTag.addBindValue(now);
+        insertTag.addBindValue(now);
+        if (!insertTag.exec()) {
+            errorOut = QString("创建标签失败：%1").arg(insertTag.lastError().text());
+            return false;
+        }
+
+        QSqlQuery queryTagId(database);
+        queryTagId.prepare(R"sql(
+            SELECT id
+            FROM tags
+            WHERE name = ?
+            LIMIT 1
+        )sql");
+        queryTagId.addBindValue(tag);
+        if (!queryTagId.exec() || !queryTagId.next()) {
+            errorOut = QString("读取标签失败：%1").arg(queryTagId.lastError().text());
+            return false;
+        }
+
+        const auto tagId = queryTagId.value(0).toLongLong();
+
+        QSqlQuery link(database);
+        link.prepare(R"sql(
+            INSERT OR IGNORE INTO entry_tags(entry_id, tag_id, created_at)
+            VALUES(?, ?, ?)
+        )sql");
+        link.addBindValue(entryId);
+        link.addBindValue(tagId);
+        link.addBindValue(now);
+        if (!link.exec()) {
+            errorOut = QString("关联标签失败：%1").arg(link.lastError().text());
+            return false;
+        }
+    }
+
+    return true;
 }
 
 } // namespace
@@ -40,7 +125,7 @@ QVector<PasswordEntry> PasswordRepository::listEntries() const
 {
     QVector<PasswordEntry> items;
 
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return items;
@@ -48,7 +133,7 @@ QVector<PasswordEntry> PasswordRepository::listEntries() const
 
     QSqlQuery query(database);
     query.prepare(R"sql(
-        SELECT id, title, username, url, category, created_at, updated_at
+        SELECT id, group_id, title, username, url, category, created_at, updated_at
         FROM password_entries
         ORDER BY updated_at DESC
     )sql");
@@ -61,12 +146,13 @@ QVector<PasswordEntry> PasswordRepository::listEntries() const
     while (query.next()) {
         PasswordEntry entry;
         entry.id = query.value(0).toLongLong();
-        entry.title = query.value(1).toString();
-        entry.username = query.value(2).toString();
-        entry.url = query.value(3).toString();
-        entry.category = query.value(4).toString();
-        entry.createdAt = QDateTime::fromSecsSinceEpoch(query.value(5).toLongLong());
-        entry.updatedAt = QDateTime::fromSecsSinceEpoch(query.value(6).toLongLong());
+        entry.groupId = query.value(1).toLongLong();
+        entry.title = query.value(2).toString();
+        entry.username = query.value(3).toString();
+        entry.url = query.value(4).toString();
+        entry.category = query.value(5).toString();
+        entry.createdAt = QDateTime::fromSecsSinceEpoch(query.value(6).toLongLong());
+        entry.updatedAt = QDateTime::fromSecsSinceEpoch(query.value(7).toLongLong());
         items.push_back(entry);
     }
 
@@ -77,7 +163,7 @@ QStringList PasswordRepository::listCategories() const
 {
     QStringList categories;
 
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return categories;
@@ -102,6 +188,200 @@ QStringList PasswordRepository::listCategories() const
     return categories;
 }
 
+QVector<PasswordGroup> PasswordRepository::listGroups() const
+{
+    QVector<PasswordGroup> groups;
+
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return groups;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        SELECT id, parent_id, name
+        FROM groups
+        ORDER BY name COLLATE NOCASE ASC
+    )sql");
+
+    if (!query.exec()) {
+        setError(QString("查询分组失败：%1").arg(query.lastError().text()));
+        return groups;
+    }
+
+    while (query.next()) {
+        PasswordGroup group;
+        group.id = query.value(0).toLongLong();
+        group.parentId = query.value(1).isNull() ? 0 : query.value(1).toLongLong();
+        group.name = query.value(2).toString();
+        groups.push_back(group);
+    }
+
+    return groups;
+}
+
+QStringList PasswordRepository::listAllTags() const
+{
+    QStringList tags;
+
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return tags;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        SELECT name
+        FROM tags
+        ORDER BY name COLLATE NOCASE ASC
+    )sql");
+
+    if (!query.exec()) {
+        setError(QString("查询标签失败：%1").arg(query.lastError().text()));
+        return tags;
+    }
+
+    while (query.next())
+        tags.push_back(query.value(0).toString());
+
+    return tags;
+}
+
+std::optional<qint64> PasswordRepository::createGroup(qint64 parentId, const QString &name)
+{
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return std::nullopt;
+    }
+
+    const auto trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        setError("分组名不能为空");
+        return std::nullopt;
+    }
+
+    if (parentId <= 0)
+        parentId = 1;
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        INSERT INTO groups(parent_id, name, created_at, updated_at)
+        VALUES(?, ?, ?, ?)
+    )sql");
+    query.addBindValue(parentId);
+    query.addBindValue(trimmed);
+    const auto now = QDateTime::currentDateTime().toSecsSinceEpoch();
+    query.addBindValue(now);
+    query.addBindValue(now);
+
+    if (!query.exec()) {
+        setError(QString("新增分组失败：%1").arg(query.lastError().text()));
+        return std::nullopt;
+    }
+
+    return query.lastInsertId().toLongLong();
+}
+
+bool PasswordRepository::renameGroup(qint64 groupId, const QString &name)
+{
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return false;
+    }
+
+    if (groupId <= 0) {
+        setError("无效的分组 id");
+        return false;
+    }
+
+    if (groupId == 1) {
+        setError("根分组不允许重命名");
+        return false;
+    }
+
+    const auto trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        setError("分组名不能为空");
+        return false;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        UPDATE groups
+        SET name = ?, updated_at = ?
+        WHERE id = ?
+    )sql");
+    query.addBindValue(trimmed);
+    query.addBindValue(QDateTime::currentDateTime().toSecsSinceEpoch());
+    query.addBindValue(groupId);
+
+    if (!query.exec()) {
+        setError(QString("重命名失败：%1").arg(query.lastError().text()));
+        return false;
+    }
+
+    return true;
+}
+
+bool PasswordRepository::deleteGroup(qint64 groupId)
+{
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return false;
+    }
+
+    if (groupId <= 0) {
+        setError("无效的分组 id");
+        return false;
+    }
+
+    if (groupId == 1) {
+        setError("根分组不允许删除");
+        return false;
+    }
+
+    QSqlQuery check(database);
+    check.prepare(R"sql(
+        SELECT
+            (SELECT COUNT(1) FROM groups WHERE parent_id = ?) AS child_count,
+            (SELECT COUNT(1) FROM password_entries WHERE group_id = ?) AS entry_count
+    )sql");
+    check.addBindValue(groupId);
+    check.addBindValue(groupId);
+    if (!check.exec() || !check.next()) {
+        setError(QString("检查分组失败：%1").arg(check.lastError().text()));
+        return false;
+    }
+
+    const auto childCount = check.value(0).toInt();
+    const auto entryCount = check.value(1).toInt();
+    if (childCount > 0) {
+        setError("该分组下存在子分组，无法删除");
+        return false;
+    }
+    if (entryCount > 0) {
+        setError("该分组下存在条目，无法删除");
+        return false;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        DELETE FROM groups WHERE id = ?
+    )sql");
+    query.addBindValue(groupId);
+    if (!query.exec()) {
+        setError(QString("删除分组失败：%1").arg(query.lastError().text()));
+        return false;
+    }
+
+    return true;
+}
+
 bool PasswordRepository::addEntry(const PasswordEntrySecrets &secrets)
 {
     const auto now = QDateTime::currentDateTime().toSecsSinceEpoch();
@@ -115,9 +395,14 @@ bool PasswordRepository::addEntryWithTimestamps(const PasswordEntrySecrets &secr
         return false;
     }
 
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
+        return false;
+    }
+
+    if (!database.transaction()) {
+        setError(QString("开启事务失败：%1").arg(database.lastError().text()));
         return false;
     }
 
@@ -127,12 +412,14 @@ bool PasswordRepository::addEntryWithTimestamps(const PasswordEntrySecrets &secr
     const auto now = QDateTime::currentDateTime().toSecsSinceEpoch();
     const auto createdAt = normalizeTs(createdAtSecs, now);
     const auto updatedAt = normalizeTs(updatedAtSecs, createdAt);
+    const auto groupId = secrets.entry.groupId > 0 ? secrets.entry.groupId : 1;
 
     QSqlQuery query(database);
     query.prepare(R"sql(
-        INSERT INTO password_entries(title, username, password_enc, url, category, notes_enc, created_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO password_entries(group_id, title, username, password_enc, url, category, notes_enc, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
     )sql");
+    query.addBindValue(groupId);
     query.addBindValue(secrets.entry.title);
     query.addBindValue(secrets.entry.username);
     query.addBindValue(passwordEnc);
@@ -143,7 +430,22 @@ bool PasswordRepository::addEntryWithTimestamps(const PasswordEntrySecrets &secr
     query.addBindValue(updatedAt);
 
     if (!query.exec()) {
+        database.rollback();
         setError(QString("新增失败：%1").arg(query.lastError().text()));
+        return false;
+    }
+
+    const auto entryId = query.lastInsertId().toLongLong();
+    QString tagsError;
+    if (!replaceEntryTags(database, entryId, normalizeTags(secrets.entry.tags), tagsError)) {
+        database.rollback();
+        setError(tagsError);
+        return false;
+    }
+
+    if (!database.commit()) {
+        database.rollback();
+        setError(QString("提交事务失败：%1").arg(database.lastError().text()));
         return false;
     }
 
@@ -157,7 +459,7 @@ bool PasswordRepository::updateEntry(const PasswordEntrySecrets &secrets)
         return false;
     }
 
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return false;
@@ -168,17 +470,24 @@ bool PasswordRepository::updateEntry(const PasswordEntrySecrets &secrets)
         return false;
     }
 
+    if (!database.transaction()) {
+        setError(QString("开启事务失败：%1").arg(database.lastError().text()));
+        return false;
+    }
+
     const auto key = vault_->masterKey();
     const auto passwordEnc = Crypto::seal(key, secrets.password.toUtf8());
     const auto notesEnc = secrets.notes.trimmed().isEmpty() ? QByteArray() : Crypto::seal(key, secrets.notes.toUtf8());
     const auto now = QDateTime::currentDateTime().toSecsSinceEpoch();
+    const auto groupId = secrets.entry.groupId > 0 ? secrets.entry.groupId : 1;
 
     QSqlQuery query(database);
     query.prepare(R"sql(
         UPDATE password_entries
-        SET title = ?, username = ?, password_enc = ?, url = ?, category = ?, notes_enc = ?, updated_at = ?
+        SET group_id = ?, title = ?, username = ?, password_enc = ?, url = ?, category = ?, notes_enc = ?, updated_at = ?
         WHERE id = ?
     )sql");
+    query.addBindValue(groupId);
     query.addBindValue(secrets.entry.title);
     query.addBindValue(secrets.entry.username);
     query.addBindValue(passwordEnc);
@@ -189,7 +498,57 @@ bool PasswordRepository::updateEntry(const PasswordEntrySecrets &secrets)
     query.addBindValue(secrets.entry.id);
 
     if (!query.exec()) {
+        database.rollback();
         setError(QString("更新失败：%1").arg(query.lastError().text()));
+        return false;
+    }
+
+    QString tagsError;
+    if (!replaceEntryTags(database, secrets.entry.id, normalizeTags(secrets.entry.tags), tagsError)) {
+        database.rollback();
+        setError(tagsError);
+        return false;
+    }
+
+    if (!database.commit()) {
+        database.rollback();
+        setError(QString("提交事务失败：%1").arg(database.lastError().text()));
+        return false;
+    }
+
+    return true;
+}
+
+bool PasswordRepository::moveEntryToGroup(qint64 entryId, qint64 groupId)
+{
+    if (!isVaultAvailable(vault_)) {
+        setError("Vault 未解锁");
+        return false;
+    }
+
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return false;
+    }
+
+    if (entryId <= 0 || groupId <= 0) {
+        setError("无效的参数");
+        return false;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        UPDATE password_entries
+        SET group_id = ?, updated_at = ?
+        WHERE id = ?
+    )sql");
+    query.addBindValue(groupId);
+    query.addBindValue(QDateTime::currentDateTime().toSecsSinceEpoch());
+    query.addBindValue(entryId);
+
+    if (!query.exec()) {
+        setError(QString("移动失败：%1").arg(query.lastError().text()));
         return false;
     }
 
@@ -198,7 +557,7 @@ bool PasswordRepository::updateEntry(const PasswordEntrySecrets &secrets)
 
 bool PasswordRepository::deleteEntry(qint64 id)
 {
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return false;
@@ -225,7 +584,7 @@ std::optional<PasswordEntrySecrets> PasswordRepository::loadEntry(qint64 id) con
         return std::nullopt;
     }
 
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return std::nullopt;
@@ -233,7 +592,7 @@ std::optional<PasswordEntrySecrets> PasswordRepository::loadEntry(qint64 id) con
 
     QSqlQuery query(database);
     query.prepare(R"sql(
-        SELECT id, title, username, password_enc, url, category, notes_enc, created_at, updated_at
+        SELECT id, group_id, title, username, password_enc, url, category, notes_enc, created_at, updated_at
         FROM password_entries
         WHERE id = ?
         LIMIT 1
@@ -252,14 +611,31 @@ std::optional<PasswordEntrySecrets> PasswordRepository::loadEntry(qint64 id) con
 
     PasswordEntrySecrets out;
     out.entry.id = query.value(0).toLongLong();
-    out.entry.title = query.value(1).toString();
-    out.entry.username = query.value(2).toString();
-    const auto passwordEnc = query.value(3).toByteArray();
-    out.entry.url = query.value(4).toString();
-    out.entry.category = query.value(5).toString();
-    const auto notesEnc = query.value(6).toByteArray();
-    out.entry.createdAt = QDateTime::fromSecsSinceEpoch(query.value(7).toLongLong());
-    out.entry.updatedAt = QDateTime::fromSecsSinceEpoch(query.value(8).toLongLong());
+    out.entry.groupId = query.value(1).toLongLong();
+    out.entry.title = query.value(2).toString();
+    out.entry.username = query.value(3).toString();
+    const auto passwordEnc = query.value(4).toByteArray();
+    out.entry.url = query.value(5).toString();
+    out.entry.category = query.value(6).toString();
+    const auto notesEnc = query.value(7).toByteArray();
+    out.entry.createdAt = QDateTime::fromSecsSinceEpoch(query.value(8).toLongLong());
+    out.entry.updatedAt = QDateTime::fromSecsSinceEpoch(query.value(9).toLongLong());
+
+    QSqlQuery tagQuery(database);
+    tagQuery.prepare(R"sql(
+        SELECT t.name
+        FROM tags t
+        INNER JOIN entry_tags et ON et.tag_id = t.id
+        WHERE et.entry_id = ?
+        ORDER BY t.name COLLATE NOCASE ASC
+    )sql");
+    tagQuery.addBindValue(id);
+    if (!tagQuery.exec()) {
+        setError(QString("读取标签失败：%1").arg(tagQuery.lastError().text()));
+        return std::nullopt;
+    }
+    while (tagQuery.next())
+        out.entry.tags.push_back(tagQuery.value(0).toString());
 
     const auto key = vault_->masterKey();
     const auto passwordPlain = Crypto::open(key, passwordEnc);
