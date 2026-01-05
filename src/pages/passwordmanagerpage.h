@@ -9,8 +9,12 @@ class QPushButton;
 class QSortFilterProxyModel;
 class QTableView;
 class QTimer;
+class QToolButton;
+class QTreeView;
 
 class PasswordEntryModel;
+class PasswordFaviconService;
+class PasswordGroupModel;
 class PasswordRepository;
 class PasswordVault;
 
@@ -30,24 +34,35 @@ private:
     void wireSignals();
     void refreshAll();
     void refreshCategories();
+    void refreshGroups();
     void updateUiState();
 
     void createVault();
     void unlockVault();
     void lockVault();
     void changeMasterPassword();
+    void showHealthReport();
+
+    void addGroup();
+    void renameSelectedGroup();
+    void deleteSelectedGroup();
 
     void addEntry();
     void editSelectedEntry();
+    void editEntryById(qint64 id);
     void deleteSelectedEntry();
+    void moveSelectedEntryToGroup();
     void copySelectedUsername();
     void copySelectedPassword();
 
     void exportBackup();
     void importBackup();
+    void exportCsv();
+    void importCsv();
 
     void resetAutoLockTimer();
     qint64 selectedEntryId() const;
+    qint64 selectedGroupId() const;
 
     QLabel *statusLabel_ = nullptr;
     QPushButton *createBtn_ = nullptr;
@@ -56,25 +71,35 @@ private:
     QPushButton *changePwdBtn_ = nullptr;
     QPushButton *importBtn_ = nullptr;
     QPushButton *exportBtn_ = nullptr;
+    QPushButton *importCsvBtn_ = nullptr;
+    QPushButton *exportCsvBtn_ = nullptr;
+    QPushButton *healthBtn_ = nullptr;
 
     QLineEdit *searchEdit_ = nullptr;
+    QLineEdit *tagFilterEdit_ = nullptr;
     QComboBox *categoryCombo_ = nullptr;
+    QToolButton *groupAddBtn_ = nullptr;
+    QToolButton *groupRenameBtn_ = nullptr;
+    QToolButton *groupDeleteBtn_ = nullptr;
+    QTreeView *groupView_ = nullptr;
     QTableView *tableView_ = nullptr;
     QLabel *hintLabel_ = nullptr;
 
     QPushButton *addBtn_ = nullptr;
     QPushButton *editBtn_ = nullptr;
     QPushButton *deleteBtn_ = nullptr;
+    QPushButton *moveBtn_ = nullptr;
     QPushButton *copyUserBtn_ = nullptr;
     QPushButton *copyPwdBtn_ = nullptr;
 
     PasswordVault *vault_ = nullptr;
     PasswordRepository *repo_ = nullptr;
     PasswordEntryModel *model_ = nullptr;
+    PasswordFaviconService *faviconService_ = nullptr;
+    PasswordGroupModel *groupModel_ = nullptr;
     QSortFilterProxyModel *proxy_ = nullptr;
 
     QTimer *autoLockTimer_ = nullptr;
     QTimer *clipboardClearTimer_ = nullptr;
     QString lastClipboardSecret_;
 };
-

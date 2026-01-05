@@ -1,8 +1,14 @@
 #include "passwordmanagerpage.h"
 
+#include "core/apppaths.h"
 #include "core/crypto.h"
 #include "pages/passwordentrydialog.h"
+#include "pages/passwordhealthdialog.h"
+#include "password/passwordcsv.h"
+#include "password/passwordcsvimportworker.h"
 #include "password/passwordentrymodel.h"
+#include "password/passwordfaviconservice.h"
+#include "password/passwordgroupmodel.h"
 #include "password/passwordrepository.h"
 #include "password/passwordvault.h"
 
@@ -19,6 +25,8 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QDir>
+#include <QHash>
 #include <QInputDialog>
 #include <QItemSelectionModel>
 #include <QJsonArray>
@@ -27,12 +35,20 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSortFilterProxyModel>
+#include <QSplitter>
+#include <QSet>
 #include <QTableView>
+#include <QThread>
 #include <QTimer>
+#include <QToolButton>
+#include <QTreeView>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace {
 
@@ -53,6 +69,18 @@ public:
         invalidateFilter();
     }
 
+    void setRequiredTags(const QStringList &tags)
+    {
+        requiredTags_ = tags;
+        invalidateFilter();
+    }
+
+    void setGroupIds(const QVector<qint64> &groupIds)
+    {
+        groupIds_ = groupIds;
+        invalidateFilter();
+    }
+
 protected:
     bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override
     {
@@ -60,24 +88,46 @@ protected:
         if (!model)
             return true;
 
+        const auto groupId = model->index(sourceRow, 0, sourceParent).data(PasswordEntryModel::GroupIdRole).toLongLong();
+        if (!groupIds_.isEmpty() && !groupIds_.contains(groupId))
+            return false;
+
         const auto title = model->index(sourceRow, 0, sourceParent).data().toString();
         const auto username = model->index(sourceRow, 1, sourceParent).data().toString();
         const auto url = model->index(sourceRow, 2, sourceParent).data().toString();
         const auto category = model->index(sourceRow, 3, sourceParent).data().toString();
+        const auto tagsText = model->index(sourceRow, 4, sourceParent).data().toString();
 
         if (!category_.isEmpty() && category_ != "全部" && category_ != category)
             return false;
 
+        if (!requiredTags_.isEmpty()) {
+            const auto rowTags = model->index(sourceRow, 0, sourceParent).data(PasswordEntryModel::TagsRole).toStringList();
+            for (const auto &required : requiredTags_) {
+                bool found = false;
+                for (const auto &tag : rowTags) {
+                    if (tag.compare(required, Qt::CaseInsensitive) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return false;
+            }
+        }
+
         if (searchText_.isEmpty())
             return true;
 
-        const auto haystack = QString("%1 %2 %3 %4").arg(title, username, url, category);
+        const auto haystack = QString("%1 %2 %3 %4 %5").arg(title, username, url, category, tagsText);
         return haystack.contains(searchText_, Qt::CaseInsensitive);
     }
 
 private:
     QString searchText_;
     QString category_ = "全部";
+    QStringList requiredTags_;
+    QVector<qint64> groupIds_;
 };
 
 QString promptPassword(QWidget *parent, const QString &title, const QString &label)
@@ -135,7 +185,10 @@ PasswordManagerPage::PasswordManagerPage(QWidget *parent) : QWidget(parent)
 {
     vault_ = new PasswordVault(this);
     repo_ = new PasswordRepository(vault_);
+    faviconService_ = new PasswordFaviconService(this);
     model_ = new PasswordEntryModel(this);
+    model_->setFaviconService(faviconService_);
+    groupModel_ = new PasswordGroupModel(this);
     proxy_ = new PasswordFilterProxyModel(this);
     proxy_->setSourceModel(model_);
 
@@ -149,6 +202,7 @@ PasswordManagerPage::PasswordManagerPage(QWidget *parent) : QWidget(parent)
 
     setupUi();
     wireSignals();
+    refreshGroups();
     refreshAll();
 
     qApp->installEventFilter(this);
@@ -194,6 +248,9 @@ void PasswordManagerPage::setupUi()
     changePwdBtn_ = new QPushButton("修改主密码", this);
     importBtn_ = new QPushButton("导入备份", this);
     exportBtn_ = new QPushButton("导出备份", this);
+    importCsvBtn_ = new QPushButton("导入 CSV", this);
+    exportCsvBtn_ = new QPushButton("导出 CSV", this);
+    healthBtn_ = new QPushButton("安全报告", this);
 
     topRow->addWidget(createBtn_);
     topRow->addWidget(unlockBtn_);
@@ -202,11 +259,18 @@ void PasswordManagerPage::setupUi()
     topRow->addSpacing(12);
     topRow->addWidget(importBtn_);
     topRow->addWidget(exportBtn_);
+    topRow->addWidget(importCsvBtn_);
+    topRow->addWidget(exportCsvBtn_);
+    topRow->addWidget(healthBtn_);
     root->addLayout(topRow);
 
     auto *filterRow = new QHBoxLayout();
     searchEdit_ = new QLineEdit(this);
-    searchEdit_->setPlaceholderText("搜索标题/账号/网址/分类…");
+    searchEdit_->setPlaceholderText("搜索标题/账号/网址/分类/标签…");
+
+    tagFilterEdit_ = new QLineEdit(this);
+    tagFilterEdit_->setPlaceholderText("标签（逗号分隔）");
+
     categoryCombo_ = new QComboBox(this);
     categoryCombo_->addItem("全部");
     categoryCombo_->addItem("未分类");
@@ -214,30 +278,71 @@ void PasswordManagerPage::setupUi()
     filterRow->addWidget(new QLabel("搜索：", this));
     filterRow->addWidget(searchEdit_, 1);
     filterRow->addSpacing(12);
+    filterRow->addWidget(new QLabel("标签：", this));
+    filterRow->addWidget(tagFilterEdit_);
+    filterRow->addSpacing(12);
     filterRow->addWidget(new QLabel("分类：", this));
     filterRow->addWidget(categoryCombo_);
     root->addLayout(filterRow);
 
-    tableView_ = new QTableView(this);
+    auto *splitter = new QSplitter(Qt::Horizontal, this);
+
+    auto *groupPanel = new QWidget(splitter);
+    auto *groupLayout = new QVBoxLayout(groupPanel);
+    groupLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *groupToolbar = new QHBoxLayout();
+    groupToolbar->addWidget(new QLabel("分组", groupPanel));
+    groupToolbar->addStretch(1);
+
+    groupAddBtn_ = new QToolButton(groupPanel);
+    groupAddBtn_->setText("新建");
+    groupRenameBtn_ = new QToolButton(groupPanel);
+    groupRenameBtn_->setText("重命名");
+    groupDeleteBtn_ = new QToolButton(groupPanel);
+    groupDeleteBtn_->setText("删除");
+    groupToolbar->addWidget(groupAddBtn_);
+    groupToolbar->addWidget(groupRenameBtn_);
+    groupToolbar->addWidget(groupDeleteBtn_);
+    groupLayout->addLayout(groupToolbar);
+
+    groupView_ = new QTreeView(groupPanel);
+    groupView_->setModel(groupModel_);
+    groupView_->setHeaderHidden(true);
+    groupView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    groupView_->setUniformRowHeights(true);
+    groupLayout->addWidget(groupView_, 1);
+
+    groupPanel->setMinimumWidth(220);
+    splitter->addWidget(groupPanel);
+
+    tableView_ = new QTableView(splitter);
     tableView_->setModel(proxy_);
     tableView_->setSelectionBehavior(QAbstractItemView::SelectRows);
     tableView_->setSelectionMode(QAbstractItemView::SingleSelection);
     tableView_->setSortingEnabled(true);
+    tableView_->setIconSize(QSize(16, 16));
     tableView_->horizontalHeader()->setStretchLastSection(true);
     tableView_->verticalHeader()->setVisible(false);
     tableView_->setWordWrap(false);
-    root->addWidget(tableView_, 1);
+    splitter->addWidget(tableView_);
+
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+    root->addWidget(splitter, 1);
 
     auto *actionRow = new QHBoxLayout();
     addBtn_ = new QPushButton("新增", this);
     editBtn_ = new QPushButton("编辑", this);
     deleteBtn_ = new QPushButton("删除", this);
+    moveBtn_ = new QPushButton("移动分组", this);
     copyUserBtn_ = new QPushButton("复制账号", this);
     copyPwdBtn_ = new QPushButton("复制密码", this);
 
     actionRow->addWidget(addBtn_);
     actionRow->addWidget(editBtn_);
     actionRow->addWidget(deleteBtn_);
+    actionRow->addWidget(moveBtn_);
     actionRow->addSpacing(12);
     actionRow->addWidget(copyUserBtn_);
     actionRow->addWidget(copyPwdBtn_);
@@ -259,18 +364,45 @@ void PasswordManagerPage::wireSignals()
     connect(changePwdBtn_, &QPushButton::clicked, this, &PasswordManagerPage::changeMasterPassword);
     connect(importBtn_, &QPushButton::clicked, this, &PasswordManagerPage::importBackup);
     connect(exportBtn_, &QPushButton::clicked, this, &PasswordManagerPage::exportBackup);
+    connect(importCsvBtn_, &QPushButton::clicked, this, &PasswordManagerPage::importCsv);
+    connect(exportCsvBtn_, &QPushButton::clicked, this, &PasswordManagerPage::exportCsv);
+    connect(healthBtn_, &QPushButton::clicked, this, &PasswordManagerPage::showHealthReport);
 
     connect(addBtn_, &QPushButton::clicked, this, &PasswordManagerPage::addEntry);
     connect(editBtn_, &QPushButton::clicked, this, &PasswordManagerPage::editSelectedEntry);
     connect(deleteBtn_, &QPushButton::clicked, this, &PasswordManagerPage::deleteSelectedEntry);
+    connect(moveBtn_, &QPushButton::clicked, this, &PasswordManagerPage::moveSelectedEntryToGroup);
     connect(copyUserBtn_, &QPushButton::clicked, this, &PasswordManagerPage::copySelectedUsername);
     connect(copyPwdBtn_, &QPushButton::clicked, this, &PasswordManagerPage::copySelectedPassword);
+
+    connect(groupAddBtn_, &QToolButton::clicked, this, &PasswordManagerPage::addGroup);
+    connect(groupRenameBtn_, &QToolButton::clicked, this, &PasswordManagerPage::renameSelectedGroup);
+    connect(groupDeleteBtn_, &QToolButton::clicked, this, &PasswordManagerPage::deleteSelectedGroup);
 
     connect(tableView_, &QTableView::doubleClicked, this, [this]() { editSelectedEntry(); });
     connect(tableView_->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this]() { updateUiState(); });
 
+    connect(groupView_->selectionModel(), &QItemSelectionModel::currentChanged, this, [this]() {
+        static_cast<PasswordFilterProxyModel *>(proxy_)->setGroupIds(groupModel_->descendantGroupIds(selectedGroupId()));
+        updateUiState();
+    });
+
     connect(searchEdit_, &QLineEdit::textChanged, this, [this](const QString &text) {
         static_cast<PasswordFilterProxyModel *>(proxy_)->setSearchText(text);
+    });
+
+    connect(tagFilterEdit_, &QLineEdit::textChanged, this, [this](const QString &text) {
+        auto normalized = text;
+        normalized.replace("，", ",");
+
+        QStringList tags;
+        for (const auto &part : normalized.split(',', Qt::SkipEmptyParts)) {
+            const auto t = part.trimmed();
+            if (!t.isEmpty())
+                tags.push_back(t);
+        }
+
+        static_cast<PasswordFilterProxyModel *>(proxy_)->setRequiredTags(tags);
     });
 
     connect(categoryCombo_, &QComboBox::currentTextChanged, this, [this](const QString &category) {
@@ -315,11 +447,32 @@ void PasswordManagerPage::refreshCategories()
     categoryCombo_->blockSignals(false);
 }
 
+void PasswordManagerPage::refreshGroups()
+{
+    const auto currentGroupId = selectedGroupId();
+
+    groupModel_->setGroups(repo_->listGroups());
+    groupView_->expandAll();
+
+    auto idx = groupModel_->indexForGroupId(currentGroupId > 0 ? currentGroupId : 1);
+    if (!idx.isValid())
+        idx = groupModel_->indexForGroupId(1);
+
+    if (idx.isValid())
+        groupView_->setCurrentIndex(idx);
+
+    static_cast<PasswordFilterProxyModel *>(proxy_)->setGroupIds(groupModel_->descendantGroupIds(selectedGroupId()));
+}
+
 void PasswordManagerPage::updateUiState()
 {
     const auto initialized = vault_->isInitialized();
     const auto unlocked = vault_->isUnlocked();
     const auto hasSelection = selectedEntryId() > 0;
+    const auto groupId = selectedGroupId();
+
+    if (faviconService_)
+        faviconService_->setNetworkEnabled(unlocked);
 
     if (!initialized) {
         statusLabel_->setText("状态：未初始化（请先设置主密码）");
@@ -336,12 +489,20 @@ void PasswordManagerPage::updateUiState()
 
     importBtn_->setEnabled(initialized && unlocked);
     exportBtn_->setEnabled(initialized && unlocked);
+    importCsvBtn_->setEnabled(initialized && unlocked);
+    exportCsvBtn_->setEnabled(initialized && unlocked);
+    healthBtn_->setEnabled(initialized && unlocked);
 
     addBtn_->setEnabled(initialized && unlocked);
     editBtn_->setEnabled(initialized && unlocked && hasSelection);
     deleteBtn_->setEnabled(initialized && unlocked && hasSelection);
+    moveBtn_->setEnabled(initialized && unlocked && hasSelection);
     copyPwdBtn_->setEnabled(initialized && unlocked && hasSelection);
     copyUserBtn_->setEnabled(hasSelection);
+
+    groupAddBtn_->setEnabled(initialized && unlocked);
+    groupRenameBtn_->setEnabled(initialized && unlocked && groupId > 1);
+    groupDeleteBtn_->setEnabled(initialized && unlocked && groupId > 1);
 
     if (unlocked)
         resetAutoLockTimer();
@@ -399,6 +560,97 @@ void PasswordManagerPage::changeMasterPassword()
     refreshAll();
 }
 
+void PasswordManagerPage::showHealthReport()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    const auto dbPath = QDir(AppPaths::appDataDir()).filePath("password.sqlite3");
+    PasswordHealthDialog dlg(dbPath, vault_->masterKey(), this);
+    connect(&dlg, &PasswordHealthDialog::entryActivated, this, [this](qint64 id) { editEntryById(id); });
+    dlg.exec();
+}
+
+void PasswordManagerPage::addGroup()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    bool ok = false;
+    const auto name = QInputDialog::getText(this, "新建分组", "分组名：", QLineEdit::Normal, "", &ok);
+    if (!ok)
+        return;
+
+    const auto createdId = repo_->createGroup(selectedGroupId(), name);
+    if (!createdId.has_value()) {
+        QMessageBox::warning(this, "失败", repo_->lastError());
+        return;
+    }
+
+    refreshGroups();
+    const auto idx = groupModel_->indexForGroupId(createdId.value());
+    if (idx.isValid())
+        groupView_->setCurrentIndex(idx);
+}
+
+void PasswordManagerPage::renameSelectedGroup()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    const auto groupId = selectedGroupId();
+    if (groupId <= 1)
+        return;
+
+    const auto currentName = groupView_->currentIndex().data().toString();
+    bool ok = false;
+    const auto name = QInputDialog::getText(this, "重命名分组", "分组名：", QLineEdit::Normal, currentName, &ok);
+    if (!ok)
+        return;
+
+    if (!repo_->renameGroup(groupId, name)) {
+        QMessageBox::warning(this, "失败", repo_->lastError());
+        return;
+    }
+
+    refreshGroups();
+}
+
+void PasswordManagerPage::deleteSelectedGroup()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    const auto groupId = selectedGroupId();
+    if (groupId <= 1)
+        return;
+
+    if (QMessageBox::question(this, "确认删除", "确定要删除该分组吗？（必须为空）") != QMessageBox::Yes)
+        return;
+
+    const auto currentIndex = groupModel_->indexForGroupId(groupId);
+    const auto parentIndex = groupModel_->parent(currentIndex);
+    const auto parentGroupId = groupModel_->groupIdForIndex(parentIndex) > 0 ? groupModel_->groupIdForIndex(parentIndex) : 1;
+
+    if (!repo_->deleteGroup(groupId)) {
+        QMessageBox::warning(this, "失败", repo_->lastError());
+        return;
+    }
+
+    refreshGroups();
+    const auto idx = groupModel_->indexForGroupId(parentGroupId);
+    if (idx.isValid())
+        groupView_->setCurrentIndex(idx);
+}
+
 void PasswordManagerPage::addEntry()
 {
     if (!vault_->isUnlocked()) {
@@ -406,12 +658,13 @@ void PasswordManagerPage::addEntry()
         return;
     }
 
-    PasswordEntryDialog dlg(repo_->listCategories(), this);
+    PasswordEntryDialog dlg(repo_->listCategories(), repo_->listAllTags(), this);
     dlg.setWindowTitle("新增密码条目");
     if (dlg.exec() != QDialog::Accepted)
         return;
 
     auto secrets = dlg.entry();
+    secrets.entry.groupId = selectedGroupId();
     if (secrets.entry.title.trimmed().isEmpty() || secrets.password.isEmpty())
         return;
 
@@ -434,14 +687,27 @@ qint64 PasswordManagerPage::selectedEntryId() const
     return item.id;
 }
 
+qint64 PasswordManagerPage::selectedGroupId() const
+{
+    if (!groupView_ || !groupModel_)
+        return 1;
+
+    const auto id = groupModel_->groupIdForIndex(groupView_->currentIndex());
+    return id > 0 ? id : 1;
+}
+
 void PasswordManagerPage::editSelectedEntry()
+{
+    editEntryById(selectedEntryId());
+}
+
+void PasswordManagerPage::editEntryById(qint64 id)
 {
     if (!vault_->isUnlocked()) {
         QMessageBox::information(this, "提示", "请先解锁");
         return;
     }
 
-    const auto id = selectedEntryId();
     if (id <= 0)
         return;
 
@@ -451,7 +717,7 @@ void PasswordManagerPage::editSelectedEntry()
         return;
     }
 
-    PasswordEntryDialog dlg(repo_->listCategories(), this);
+    PasswordEntryDialog dlg(repo_->listCategories(), repo_->listAllTags(), this);
     dlg.setWindowTitle("编辑密码条目");
     dlg.setEntry(loaded.value());
     if (dlg.exec() != QDialog::Accepted)
@@ -483,6 +749,101 @@ void PasswordManagerPage::deleteSelectedEntry()
         return;
 
     if (!repo_->deleteEntry(id)) {
+        QMessageBox::warning(this, "失败", repo_->lastError());
+        return;
+    }
+
+    refreshAll();
+}
+
+void PasswordManagerPage::moveSelectedEntryToGroup()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    const auto id = selectedEntryId();
+    if (id <= 0)
+        return;
+
+    const auto groups = repo_->listGroups();
+    if (groups.isEmpty()) {
+        QMessageBox::warning(this, "失败", "没有可用分组");
+        return;
+    }
+
+    QHash<qint64, PasswordGroup> groupsById;
+    for (const auto &g : groups)
+        groupsById.insert(g.id, g);
+
+    auto makePath = [&](qint64 groupId) {
+        QStringList parts;
+        qint64 current = groupId;
+        int guard = 0;
+        while (current > 0 && groupsById.contains(current) && guard++ < 32) {
+            const auto &g = groupsById[current];
+            parts.prepend(g.name);
+            current = g.parentId;
+        }
+        return parts.join("/");
+    };
+
+    struct Option final
+    {
+        qint64 id = 0;
+        QString path;
+    };
+
+    QVector<Option> options;
+    options.reserve(groups.size());
+    for (const auto &g : groups) {
+        if (g.id <= 0)
+            continue;
+        options.push_back(Option{g.id, makePath(g.id)});
+    }
+
+    std::sort(options.begin(), options.end(), [](const Option &a, const Option &b) {
+        return a.path.toLower() < b.path.toLower();
+    });
+
+    QStringList items;
+    QVector<qint64> ids;
+    items.reserve(options.size());
+    ids.reserve(options.size());
+    for (const auto &opt : options) {
+        ids.push_back(opt.id);
+        items.push_back(opt.path);
+    }
+
+    qint64 currentGroupId = 1;
+    const auto currentIndex = tableView_->currentIndex();
+    if (currentIndex.isValid()) {
+        const auto sourceIndex = proxy_->mapToSource(currentIndex);
+        currentGroupId = model_->itemAt(sourceIndex.row()).groupId;
+        if (currentGroupId <= 0)
+            currentGroupId = 1;
+    }
+
+    int defaultIndex = 0;
+    for (int i = 0; i < ids.size(); ++i) {
+        if (ids.at(i) == currentGroupId) {
+            defaultIndex = i;
+            break;
+        }
+    }
+
+    bool ok = false;
+    const auto selected = QInputDialog::getItem(this, "移动到分组", "选择分组：", items, defaultIndex, false, &ok);
+    if (!ok)
+        return;
+
+    const auto selectedIdx = items.indexOf(selected);
+    if (selectedIdx < 0 || selectedIdx >= ids.size())
+        return;
+
+    const auto groupId = ids.at(selectedIdx);
+    if (!repo_->moveEntryToGroup(id, groupId)) {
         QMessageBox::warning(this, "失败", repo_->lastError());
         return;
     }
@@ -551,6 +912,15 @@ void PasswordManagerPage::exportBackup()
     if (backupPassword.isEmpty())
         return;
 
+    QJsonArray groups;
+    for (const auto &g : repo_->listGroups()) {
+        QJsonObject obj;
+        obj["id"] = g.id;
+        obj["parent_id"] = g.parentId;
+        obj["name"] = g.name;
+        groups.append(obj);
+    }
+
     QJsonArray entries;
     for (const auto &summary : repo_->listEntries()) {
         const auto full = repo_->loadEntry(summary.id);
@@ -564,7 +934,12 @@ void PasswordManagerPage::exportBackup()
         obj["username"] = full->entry.username;
         obj["password"] = full->password;
         obj["url"] = full->entry.url;
+        obj["group_id"] = full->entry.groupId;
         obj["category"] = full->entry.category;
+        QJsonArray tags;
+        for (const auto &tag : full->entry.tags)
+            tags.append(tag);
+        obj["tags"] = tags;
         obj["notes"] = full->notes;
         obj["created_at"] = full->entry.createdAt.toSecsSinceEpoch();
         obj["updated_at"] = full->entry.updatedAt.toSecsSinceEpoch();
@@ -574,6 +949,7 @@ void PasswordManagerPage::exportBackup()
     QJsonObject plainRoot;
     plainRoot["version"] = 1;
     plainRoot["exported_at"] = QDateTime::currentDateTime().toSecsSinceEpoch();
+    plainRoot["groups"] = groups;
     plainRoot["entries"] = entries;
 
     const auto plainJson = QJsonDocument(plainRoot).toJson(QJsonDocument::Compact);
@@ -674,6 +1050,95 @@ void PasswordManagerPage::importBackup()
         return;
     }
 
+    QHash<qint64, qint64> groupIdMap;
+    groupIdMap.insert(1, 1);
+    bool hasGroupMap = false;
+    if (innerRoot.value("groups").isArray()) {
+        struct BackupGroup final
+        {
+            qint64 id = 0;
+            qint64 parentId = 0;
+            QString name;
+        };
+
+        QHash<QString, qint64> existingGroups;
+        for (const auto &g : repo_->listGroups()) {
+            existingGroups.insert(QString("%1\n%2").arg(g.parentId).arg(g.name.trimmed().toLower()), g.id);
+        }
+
+        const auto ensureGroup = [&](qint64 parentId, const QString &name) -> qint64 {
+            const auto trimmed = name.trimmed();
+            if (trimmed.isEmpty())
+                return 0;
+
+            if (parentId <= 0)
+                parentId = 1;
+
+            const auto key = QString("%1\n%2").arg(parentId).arg(trimmed.toLower());
+            if (existingGroups.contains(key))
+                return existingGroups.value(key);
+
+            const auto created = repo_->createGroup(parentId, trimmed);
+            if (!created.has_value())
+                return 0;
+            existingGroups.insert(key, created.value());
+            return created.value();
+        };
+
+        QVector<BackupGroup> pending;
+        for (const auto &v : innerRoot.value("groups").toArray()) {
+            const auto obj = v.toObject();
+            BackupGroup g;
+            g.id = static_cast<qint64>(obj.value("id").toDouble());
+            g.parentId = static_cast<qint64>(obj.value("parent_id").toDouble());
+            g.name = obj.value("name").toString();
+            if (g.id <= 1)
+                continue;
+            if (g.name.trimmed().isEmpty())
+                continue;
+            pending.push_back(g);
+        }
+
+        bool progress = true;
+        while (!pending.isEmpty() && progress) {
+            progress = false;
+            for (int i = 0; i < pending.size();) {
+                const auto g = pending.at(i);
+                auto parentOldId = g.parentId;
+                if (parentOldId <= 0)
+                    parentOldId = 1;
+                if (!groupIdMap.contains(parentOldId)) {
+                    ++i;
+                    continue;
+                }
+
+                const auto parentNewId = groupIdMap.value(parentOldId, 1);
+                const auto newId = ensureGroup(parentNewId, g.name);
+                if (newId <= 0) {
+                    QMessageBox::warning(this, "失败", repo_->lastError().isEmpty() ? "创建分组失败" : repo_->lastError());
+                    return;
+                }
+                groupIdMap.insert(g.id, newId);
+                pending.removeAt(i);
+                progress = true;
+            }
+        }
+
+        for (const auto &g : pending) {
+            const auto newId = ensureGroup(1, g.name);
+            if (newId > 0)
+                groupIdMap.insert(g.id, newId);
+        }
+
+        hasGroupMap = true;
+    }
+
+    QSet<qint64> groupIds;
+    if (!hasGroupMap) {
+        for (const auto &g : repo_->listGroups())
+            groupIds.insert(g.id);
+    }
+
     const auto entries = innerRoot.value("entries").toArray();
     int imported = 0;
     for (const auto &v : entries) {
@@ -683,7 +1148,20 @@ void PasswordManagerPage::importBackup()
         secrets.entry.username = obj.value("username").toString();
         secrets.password = obj.value("password").toString();
         secrets.entry.url = obj.value("url").toString();
+        const auto groupId = static_cast<qint64>(obj.value("group_id").toDouble());
+        if (hasGroupMap)
+            secrets.entry.groupId = groupIdMap.value(groupId, 1);
+        else
+            secrets.entry.groupId = groupIds.contains(groupId) ? groupId : 1;
         secrets.entry.category = obj.value("category").toString();
+        const auto tags = obj.value("tags");
+        if (tags.isArray()) {
+            for (const auto &tv : tags.toArray()) {
+                const auto t = tv.toString().trimmed();
+                if (!t.isEmpty())
+                    secrets.entry.tags.push_back(t);
+            }
+        }
         secrets.notes = obj.value("notes").toString();
         const auto createdAt = static_cast<qint64>(obj.value("created_at").toDouble());
         const auto updatedAt = static_cast<qint64>(obj.value("updated_at").toDouble());
@@ -700,4 +1178,118 @@ void PasswordManagerPage::importBackup()
 
     refreshAll();
     QMessageBox::information(this, "完成", QString("导入完成：%1 条。").arg(imported));
+}
+
+void PasswordManagerPage::exportCsv()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    const auto warning =
+        "CSV 导出包含明文密码，存在安全风险。\n"
+        "建议：导出后仅用于临时迁移，使用完立即删除，并避免通过网盘/聊天软件传输。\n\n"
+        "确定继续导出吗？";
+
+    if (QMessageBox::warning(this, "风险提示", warning, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    const auto path = QFileDialog::getSaveFileName(this, "导出 CSV", "", "CSV 文件 (*.csv)");
+    if (path.isEmpty())
+        return;
+
+    QVector<PasswordEntrySecrets> entries;
+    const auto summaries = repo_->listEntries();
+    entries.reserve(summaries.size());
+    for (const auto &summary : summaries) {
+        const auto full = repo_->loadEntry(summary.id);
+        if (!full.has_value()) {
+            QMessageBox::warning(this, "失败", repo_->lastError());
+            return;
+        }
+        entries.push_back(full.value());
+    }
+
+    QSaveFile out(path);
+    if (!out.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, "失败", "无法写入文件");
+        return;
+    }
+    out.write(exportPasswordCsv(entries));
+    if (!out.commit()) {
+        QMessageBox::warning(this, "失败", "写入文件失败");
+        return;
+    }
+
+    QMessageBox::information(this, "完成", QString("已导出 %1 条。").arg(entries.size()));
+}
+
+void PasswordManagerPage::importCsv()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    const auto path = QFileDialog::getOpenFileName(this, "导入 CSV", "", "CSV 文件 (*.csv)");
+    if (path.isEmpty())
+        return;
+
+    const auto info =
+        "请确认该 CSV 文件来源可信。\n"
+        "注意：浏览器导出的 CSV 通常包含明文密码，导入完成后建议立即删除原文件。\n\n"
+        "确定开始导入吗？";
+
+    if (QMessageBox::question(this, "导入提示", info, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    const auto dbPath = QDir(AppPaths::appDataDir()).filePath("password.sqlite3");
+    auto *thread = new QThread(this);
+    auto *worker = new PasswordCsvImportWorker(path, dbPath, vault_->masterKey(), selectedGroupId(), nullptr);
+    worker->moveToThread(thread);
+
+    auto *progress = new QProgressDialog("正在导入 CSV…", "取消", 0, 0, this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->show();
+
+    connect(progress, &QProgressDialog::canceled, this, [worker]() { worker->requestCancel(); });
+    connect(thread, &QThread::started, worker, &PasswordCsvImportWorker::run);
+    connect(worker, &PasswordCsvImportWorker::progressRangeChanged, progress, &QProgressDialog::setRange);
+    connect(worker, &PasswordCsvImportWorker::progressValueChanged, progress, &QProgressDialog::setValue);
+
+    connect(worker, &PasswordCsvImportWorker::failed, this, [this, progress](const QString &error) {
+        progress->close();
+        if (error.contains("取消")) {
+            QMessageBox::information(this, "已取消", error);
+        } else {
+            QMessageBox::warning(this, "导入失败", error);
+        }
+    });
+
+    connect(worker,
+            &PasswordCsvImportWorker::finished,
+            this,
+            [this, progress](int imported, int skippedDuplicates, int skippedInvalid, const QStringList &warnings) {
+                progress->close();
+                refreshAll();
+
+                QString msg = QString("导入完成：%1 条。\n跳过重复：%2 条。\n跳过无效：%3 条。")
+                                  .arg(imported)
+                                  .arg(skippedDuplicates)
+                                  .arg(skippedInvalid);
+                if (!warnings.isEmpty())
+                    msg.append(QString("\n\n提示：\n- %1").arg(warnings.join("\n- ")));
+                QMessageBox::information(this, "完成", msg);
+            });
+
+    connect(worker, &PasswordCsvImportWorker::finished, thread, &QThread::quit);
+    connect(worker, &PasswordCsvImportWorker::failed, thread, &QThread::quit);
+    connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    connect(thread, &QThread::finished, progress, &QObject::deleteLater);
+
+    thread->start();
 }
