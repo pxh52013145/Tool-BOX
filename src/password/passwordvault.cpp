@@ -1,7 +1,7 @@
 #include "passwordvault.h"
 
 #include "core/crypto.h"
-#include "core/database.h"
+#include "passworddatabase.h"
 
 #include <QDateTime>
 #include <QSqlError>
@@ -62,7 +62,7 @@ void PasswordVault::setError(const QString &error)
 
 std::optional<PasswordVault::Meta> PasswordVault::readMeta()
 {
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return std::nullopt;
@@ -93,7 +93,7 @@ std::optional<PasswordVault::Meta> PasswordVault::readMeta()
 
 bool PasswordVault::writeMeta(const Meta &meta)
 {
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return false;
@@ -194,7 +194,7 @@ bool PasswordVault::changeMasterPassword(const QString &newMasterPassword)
         return false;
     }
 
-    auto database = Database::db();
+    auto database = PasswordDatabase::db();
     if (!database.isOpen()) {
         setError("数据库未打开");
         return false;
@@ -279,4 +279,3 @@ bool PasswordVault::changeMasterPassword(const QString &newMasterPassword)
     emit stateChanged();
     return true;
 }
-
