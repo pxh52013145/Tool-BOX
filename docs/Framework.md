@@ -31,11 +31,12 @@
 - `Platform (Windows)`：全局热键、鼠标/键盘钩子（可选）、UI Automation 取词/填充、窗口定位、置顶/不抢焦点浮窗。
 
 ### 3.2 进程与通信
-建议单进程起步，预留扩展通信：
-- 浏览器扩展（必需）：使用 Native Messaging Host 启动/连接桌面端。
-- 本地 IPC（可选增强）：`QLocalServer`（命名管道）或本地 WebSocket/HTTP（仅 `127.0.0.1`），用于：
-  - 扩展→桌面端：查询可用账号、请求填充、保存/更新提示
-  - 桌面端→扩展：主动锁定/解锁状态、配置更新
+当前实现采用“启动器 + 独立工具进程”的方式，Toolbox 作为容器只负责拉起工具：
+- `ToolboxLauncher`：启动器（可托盘常驻），负责启动 `ToolboxPassword` / `ToolboxTranslate`；退出启动器**不影响**工具进程。
+- `ToolboxPassword`：独立的密码管理器程序（SQLite + 加密 + 导入导出）。
+- `ToolboxTranslate`：独立的翻译工具程序（HTTP + 历史记录）。
+- 单实例：三者均使用 `QLocalServer/QLocalSocket` 实现“单实例 + 唤起已运行窗口”。
+- 预留扩展：后续浏览器扩展 / 其他模块通信可继续基于 `QLocalServer` 或本地 WebSocket/HTTP（仅 `127.0.0.1`）。
 
 ## 4. 密码管理器（Password）
 
@@ -102,11 +103,13 @@
 
 ## 6. 代码组织建议（qmake 起步，可平滑迁移 CMake）
 建议目录（不强制，先在 docs 对齐）：
-- `src/app`：入口、托盘、路由
-- `src/core`：配置、日志、加密、IPC、模型
-- `src/platform/windows`：UIA、hotkey、window utils
-- `src/features/password`
-- `src/features/translate`
+- `apps/launcher`：启动器入口（托盘与启动逻辑）
+- `apps/password_app`：密码管理器入口
+- `apps/translate_app`：翻译工具入口
+- `src/core`：配置、日志、加密、单实例等基础设施
+- `src/password`：密码模块核心（Vault/DB/Repo/Model）
+- `src/translate`：翻译模块核心（Provider/Service/DB/Model）
+- `src/pages`：各工具的 UI 页面组件
 - `extensions/`：浏览器扩展（后续加入）
 
 ## 7. 风险与对策（必须提前认清）

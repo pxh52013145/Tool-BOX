@@ -1,5 +1,7 @@
 ﻿# Translator 方案细化（草案）
 
+> 当前实现已拆分为独立程序 `ToolboxTranslate`，可由 `ToolboxLauncher` 启动；退出启动器不影响翻译工具运行。
+
 ## 1. MVP 功能清单
 - 全局热键触发翻译（可配置）。
 - 取词：UIA 选中文本优先，剪贴板兜底（读取后还原剪贴板）。
@@ -40,3 +42,9 @@
 - 值得参考的设计点：
   - UI 交互：“悬停小球”和“划词后即时图标”的交互逻辑。
   - 插件化接口：可扩展不同翻译源插件。
+
+## 6. 代码位置（当前实现）
+- 程序入口：`apps/translate_app/*`
+- 数据库：`src/translate/translatedatabase.*`（独立 SQLite 文件：`translate.sqlite3`）
+- Provider/Service：`src/translate/*`
+- 历史记录 Model/View：`src/translate/translationhistorymodel.*`、`src/pages/translatorpage.*`
