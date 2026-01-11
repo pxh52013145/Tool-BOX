@@ -46,6 +46,7 @@ SOURCES += \
     ../../src/password/passwordhealthmodel.cpp \
     ../../src/password/passwordgroupmodel.cpp \
     ../../src/pages/passwordmanagerpage.cpp \
+    ../../src/pages/passwordcommonpasswordsdialog.cpp \
     ../../src/pages/passwordcsvimportdialog.cpp \
     ../../src/pages/passwordentrydialog.cpp \
     ../../src/pages/passwordgraphdialog.cpp \
@@ -77,6 +78,7 @@ HEADERS += \
     ../../src/password/passwordentrymodel.h \
     ../../src/password/passwordgroupmodel.h \
     ../../src/pages/passwordmanagerpage.h \
+    ../../src/pages/passwordcommonpasswordsdialog.h \
     ../../src/pages/passwordcsvimportdialog.h \
     ../../src/pages/passwordentrydialog.h \
     ../../src/pages/passwordgraphdialog.h \
