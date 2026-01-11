@@ -2,6 +2,7 @@
 
 #include "core/apppaths.h"
 #include "core/crypto.h"
+#include "pages/passwordcommonpasswordsdialog.h"
 #include "pages/passwordcsvimportdialog.h"
 #include "pages/passwordentrydialog.h"
 #include "pages/passwordgraphdialog.h"
@@ -271,6 +272,7 @@ void PasswordManagerPage::setupUi()
     healthBtn_ = new QPushButton("安全报告", this);
     webAssistantBtn_ = new QPushButton("Web 助手", this);
     graphBtn_ = new QPushButton("图谱", this);
+    commonPwdBtn_ = new QPushButton("常用密码", this);
 
     topRow->addWidget(createBtn_);
     topRow->addWidget(unlockBtn_);
@@ -284,6 +286,7 @@ void PasswordManagerPage::setupUi()
     topRow->addWidget(healthBtn_);
     topRow->addWidget(webAssistantBtn_);
     topRow->addWidget(graphBtn_);
+    topRow->addWidget(commonPwdBtn_);
     root->addLayout(topRow);
 
 #ifndef TBX_HAS_WEBENGINE
@@ -412,6 +415,7 @@ void PasswordManagerPage::wireSignals()
     connect(healthBtn_, &QPushButton::clicked, this, &PasswordManagerPage::showHealthReport);
     connect(webAssistantBtn_, &QPushButton::clicked, this, &PasswordManagerPage::showWebAssistant);
     connect(graphBtn_, &QPushButton::clicked, this, &PasswordManagerPage::showGraph);
+    connect(commonPwdBtn_, &QPushButton::clicked, this, &PasswordManagerPage::showCommonPasswords);
 
     connect(addBtn_, &QPushButton::clicked, this, &PasswordManagerPage::addEntry);
     connect(editBtn_, &QPushButton::clicked, this, &PasswordManagerPage::editSelectedEntry);
@@ -509,6 +513,17 @@ void PasswordManagerPage::showGraph()
     dlg.exec();
 }
 
+void PasswordManagerPage::showCommonPasswords()
+{
+    if (!vault_->isUnlocked()) {
+        QMessageBox::information(this, "提示", "请先解锁");
+        return;
+    }
+
+    PasswordCommonPasswordsDialog dlg(repo_, vault_, this);
+    dlg.exec();
+}
+
 void PasswordManagerPage::refreshAll()
 {
     model_->reload();
@@ -577,6 +592,7 @@ void PasswordManagerPage::updateUiState()
     exportCsvBtn_->setEnabled(initialized && unlocked);
     healthBtn_->setEnabled(initialized && unlocked);
     graphBtn_->setEnabled(initialized && unlocked);
+    commonPwdBtn_->setEnabled(initialized && unlocked);
 
     addBtn_->setEnabled(initialized && unlocked);
     editBtn_->setEnabled(initialized && unlocked && hasSelection);

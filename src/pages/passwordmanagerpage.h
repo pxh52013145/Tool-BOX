@@ -44,6 +44,7 @@ private:
     void showHealthReport();
     void showWebAssistant();
     void showGraph();
+    void showCommonPasswords();
 
     void addGroup();
     void renameSelectedGroup();
@@ -78,6 +79,7 @@ private:
     QPushButton *healthBtn_ = nullptr;
     QPushButton *webAssistantBtn_ = nullptr;
     QPushButton *graphBtn_ = nullptr;
+    QPushButton *commonPwdBtn_ = nullptr;
 
     QLineEdit *searchEdit_ = nullptr;
     QLineEdit *tagFilterEdit_ = nullptr;
