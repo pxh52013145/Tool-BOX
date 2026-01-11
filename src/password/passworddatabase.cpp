@@ -154,6 +154,24 @@ bool PasswordDatabase::ensureSchema(QSqlDatabase &database)
         return false;
 
     if (!query.exec(R"sql(
+        CREATE TABLE IF NOT EXISTS common_passwords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            password_enc BLOB NOT NULL,
+            notes_enc BLOB,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+    )sql"))
+        return false;
+
+    if (!query.exec(R"sql(
+        CREATE INDEX IF NOT EXISTS idx_common_passwords_updated_at
+        ON common_passwords(updated_at DESC)
+    )sql"))
+        return false;
+
+    if (!query.exec(R"sql(
         CREATE TABLE IF NOT EXISTS entry_tags (
             entry_id INTEGER NOT NULL,
             tag_id INTEGER NOT NULL,

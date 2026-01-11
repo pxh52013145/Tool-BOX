@@ -74,3 +74,18 @@ struct PasswordEntrySecrets final
     QString password;
     QString notes;
 };
+
+struct PasswordCommonPassword final
+{
+    qint64 id = 0;
+    QString name;
+    QDateTime createdAt;
+    QDateTime updatedAt;
+};
+
+struct PasswordCommonPasswordSecrets final
+{
+    PasswordCommonPassword item;
+    QString password;
+    QString notes;
+};

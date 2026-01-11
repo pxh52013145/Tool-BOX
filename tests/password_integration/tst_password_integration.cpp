@@ -395,6 +395,46 @@ private slots:
         QCOMPARE(static_cast<int>(list.at(0).type), static_cast<int>(PasswordEntryType::ApiKeyToken));
     }
 
+    void common_password_crud()
+    {
+        PasswordVault vault;
+        QVERIFY(vault.createVault("master"));
+
+        PasswordRepository repo(&vault);
+
+        PasswordCommonPasswordSecrets c;
+        c.item.name = "常用密码A";
+        c.password = "CommonPwd!123";
+        c.notes = "demo";
+        QVERIFY(repo.addCommonPassword(c));
+
+        const auto list = repo.listCommonPasswords();
+        QCOMPARE(list.size(), 1);
+        QCOMPARE(list.at(0).name, QString("常用密码A"));
+        QVERIFY(list.at(0).id > 0);
+
+        const auto loaded = repo.loadCommonPassword(list.at(0).id);
+        QVERIFY(loaded.has_value());
+        QCOMPARE(loaded->item.name, QString("常用密码A"));
+        QCOMPARE(loaded->password, QString("CommonPwd!123"));
+        QCOMPARE(loaded->notes, QString("demo"));
+
+        PasswordCommonPasswordSecrets updated = loaded.value();
+        updated.item.name = "常用密码B";
+        updated.password = "NewPwd!456";
+        updated.notes = "";
+        QVERIFY(repo.updateCommonPassword(updated));
+
+        const auto loaded2 = repo.loadCommonPassword(updated.item.id);
+        QVERIFY(loaded2.has_value());
+        QCOMPARE(loaded2->item.name, QString("常用密码B"));
+        QCOMPARE(loaded2->password, QString("NewPwd!456"));
+        QVERIFY(loaded2->notes.isEmpty());
+
+        QVERIFY(repo.deleteCommonPassword(updated.item.id));
+        QCOMPARE(repo.listCommonPasswords().size(), 0);
+    }
+
     void csv_import_dedup_and_health_scan()
     {
         PasswordVault vault;
@@ -628,6 +668,7 @@ private:
 
         QSqlQuery q(db);
         QVERIFY(q.exec("DELETE FROM password_entries"));
+        QVERIFY(q.exec("DELETE FROM common_passwords"));
         QVERIFY(q.exec("DELETE FROM tags"));
         QVERIFY(q.exec("DELETE FROM favicon_cache"));
         QVERIFY(q.exec("DELETE FROM pwned_prefix_cache"));

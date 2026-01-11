@@ -24,6 +24,12 @@ public:
     QVector<PasswordGroup> listGroups() const;
     QStringList listAllTags() const;
 
+    QVector<PasswordCommonPassword> listCommonPasswords() const;
+    std::optional<PasswordCommonPasswordSecrets> loadCommonPassword(qint64 id) const;
+    bool addCommonPassword(const PasswordCommonPasswordSecrets &secrets);
+    bool updateCommonPassword(const PasswordCommonPasswordSecrets &secrets);
+    bool deleteCommonPassword(qint64 id);
+
     std::optional<qint64> createGroup(qint64 parentId, const QString &name);
     bool renameGroup(qint64 groupId, const QString &name);
     bool deleteGroup(qint64 groupId);

@@ -250,6 +250,248 @@ QStringList PasswordRepository::listAllTags() const
     return tags;
 }
 
+QVector<PasswordCommonPassword> PasswordRepository::listCommonPasswords() const
+{
+    QVector<PasswordCommonPassword> items;
+
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return items;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        SELECT id, name, created_at, updated_at
+        FROM common_passwords
+        ORDER BY updated_at DESC, id DESC
+    )sql");
+
+    if (!query.exec()) {
+        setError(QString("查询常用密码失败：%1").arg(query.lastError().text()));
+        return items;
+    }
+
+    while (query.next()) {
+        PasswordCommonPassword item;
+        item.id = query.value(0).toLongLong();
+        item.name = query.value(1).toString();
+        item.createdAt = QDateTime::fromSecsSinceEpoch(query.value(2).toLongLong());
+        item.updatedAt = QDateTime::fromSecsSinceEpoch(query.value(3).toLongLong());
+        items.push_back(item);
+    }
+
+    return items;
+}
+
+std::optional<PasswordCommonPasswordSecrets> PasswordRepository::loadCommonPassword(qint64 id) const
+{
+    if (!isVaultAvailable(vault_)) {
+        setError("Vault 未解锁");
+        return std::nullopt;
+    }
+
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return std::nullopt;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        SELECT id, name, password_enc, notes_enc, created_at, updated_at
+        FROM common_passwords
+        WHERE id = ?
+        LIMIT 1
+    )sql");
+    query.addBindValue(id);
+
+    if (!query.exec()) {
+        setError(QString("查询失败：%1").arg(query.lastError().text()));
+        return std::nullopt;
+    }
+
+    if (!query.next()) {
+        setError("未找到常用密码");
+        return std::nullopt;
+    }
+
+    PasswordCommonPasswordSecrets out;
+    out.item.id = query.value(0).toLongLong();
+    out.item.name = query.value(1).toString();
+    const auto passwordEnc = query.value(2).toByteArray();
+    const auto notesEnc = query.value(3).toByteArray();
+    out.item.createdAt = QDateTime::fromSecsSinceEpoch(query.value(4).toLongLong());
+    out.item.updatedAt = QDateTime::fromSecsSinceEpoch(query.value(5).toLongLong());
+
+    const auto key = vault_->masterKey();
+    const auto passwordPlain = Crypto::open(key, passwordEnc);
+    if (!passwordPlain.has_value()) {
+        setError("解密失败：常用密码数据损坏或主密码不匹配");
+        return std::nullopt;
+    }
+    out.password = QString::fromUtf8(passwordPlain.value());
+
+    if (!notesEnc.isEmpty()) {
+        const auto notesPlain = Crypto::open(key, notesEnc);
+        if (!notesPlain.has_value()) {
+            setError("解密失败：备注数据损坏或主密码不匹配");
+            return std::nullopt;
+        }
+        out.notes = QString::fromUtf8(notesPlain.value());
+    }
+
+    return out;
+}
+
+bool PasswordRepository::addCommonPassword(const PasswordCommonPasswordSecrets &secrets)
+{
+    if (!isVaultAvailable(vault_)) {
+        setError("Vault 未解锁");
+        return false;
+    }
+
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return false;
+    }
+
+    const auto name = secrets.item.name.trimmed();
+    if (name.isEmpty()) {
+        setError("名称不能为空");
+        return false;
+    }
+
+    if (secrets.password.isEmpty()) {
+        setError("密码不能为空");
+        return false;
+    }
+
+    if (!database.transaction()) {
+        setError(QString("开启事务失败：%1").arg(database.lastError().text()));
+        return false;
+    }
+
+    const auto now = QDateTime::currentDateTime().toSecsSinceEpoch();
+    const auto key = vault_->masterKey();
+    const auto passwordEnc = Crypto::seal(key, secrets.password.toUtf8());
+    const auto notesEnc = secrets.notes.trimmed().isEmpty() ? QByteArray() : Crypto::seal(key, secrets.notes.toUtf8());
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        INSERT INTO common_passwords(name, password_enc, notes_enc, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?)
+    )sql");
+    query.addBindValue(name);
+    query.addBindValue(passwordEnc);
+    query.addBindValue(notesEnc);
+    query.addBindValue(now);
+    query.addBindValue(now);
+
+    if (!query.exec()) {
+        database.rollback();
+        setError(QString("新增失败：%1").arg(query.lastError().text()));
+        return false;
+    }
+
+    if (!database.commit()) {
+        database.rollback();
+        setError(QString("提交事务失败：%1").arg(database.lastError().text()));
+        return false;
+    }
+
+    return true;
+}
+
+bool PasswordRepository::updateCommonPassword(const PasswordCommonPasswordSecrets &secrets)
+{
+    if (!isVaultAvailable(vault_)) {
+        setError("Vault 未解锁");
+        return false;
+    }
+
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return false;
+    }
+
+    if (secrets.item.id <= 0) {
+        setError("无效的 id");
+        return false;
+    }
+
+    const auto name = secrets.item.name.trimmed();
+    if (name.isEmpty()) {
+        setError("名称不能为空");
+        return false;
+    }
+
+    if (secrets.password.isEmpty()) {
+        setError("密码不能为空");
+        return false;
+    }
+
+    if (!database.transaction()) {
+        setError(QString("开启事务失败：%1").arg(database.lastError().text()));
+        return false;
+    }
+
+    const auto now = QDateTime::currentDateTime().toSecsSinceEpoch();
+    const auto key = vault_->masterKey();
+    const auto passwordEnc = Crypto::seal(key, secrets.password.toUtf8());
+    const auto notesEnc = secrets.notes.trimmed().isEmpty() ? QByteArray() : Crypto::seal(key, secrets.notes.toUtf8());
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        UPDATE common_passwords
+        SET name = ?, password_enc = ?, notes_enc = ?, updated_at = ?
+        WHERE id = ?
+    )sql");
+    query.addBindValue(name);
+    query.addBindValue(passwordEnc);
+    query.addBindValue(notesEnc);
+    query.addBindValue(now);
+    query.addBindValue(secrets.item.id);
+
+    if (!query.exec()) {
+        database.rollback();
+        setError(QString("更新失败：%1").arg(query.lastError().text()));
+        return false;
+    }
+
+    if (!database.commit()) {
+        database.rollback();
+        setError(QString("提交事务失败：%1").arg(database.lastError().text()));
+        return false;
+    }
+
+    return true;
+}
+
+bool PasswordRepository::deleteCommonPassword(qint64 id)
+{
+    auto database = PasswordDatabase::db();
+    if (!database.isOpen()) {
+        setError("数据库未打开");
+        return false;
+    }
+
+    QSqlQuery query(database);
+    query.prepare(R"sql(
+        DELETE FROM common_passwords WHERE id = ?
+    )sql");
+    query.addBindValue(id);
+
+    if (!query.exec()) {
+        setError(QString("删除失败：%1").arg(query.lastError().text()));
+        return false;
+    }
+
+    return true;
+}
+
 std::optional<qint64> PasswordRepository::createGroup(qint64 parentId, const QString &name)
 {
     auto database = PasswordDatabase::db();
