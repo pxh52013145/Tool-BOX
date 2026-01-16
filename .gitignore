@@ -14,3 +14,7 @@ reference/.env.local
 reference/keepassxc/
 .DS_Store
 Thumbs.db
+__pycache__/
+*.pyc
+*.pyo
+*.mp4
