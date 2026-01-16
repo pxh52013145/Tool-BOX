@@ -9,6 +9,7 @@
 #include "password/passwordvault.h"
 
 #include <QDialogButtonBox>
+#include <QFile>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -448,15 +449,29 @@ void PasswordWebAssistantDialog::setupWebChannel()
 
 void PasswordWebAssistantDialog::injectScripts()
 {
+    QFile webChannelFile(":/qtwebchannel/qwebchannel.js");
+    if (webChannelFile.open(QIODevice::ReadOnly)) {
+        QWebEngineScript webChannelScript;
+        webChannelScript.setName("tbx_qwebchannel");
+        webChannelScript.setInjectionPoint(QWebEngineScript::DocumentCreation);
+        webChannelScript.setRunsOnSubFrames(true);
+        webChannelScript.setSourceCode(QString::fromUtf8(webChannelFile.readAll()));
+        view_->page()->scripts().insert(webChannelScript);
+    }
+
     QWebEngineScript script;
     script.setName("tbx_password_assistant");
     script.setInjectionPoint(QWebEngineScript::DocumentReady);
     script.setRunsOnSubFrames(true);
 
     script.setSourceCode(R"JS(
-(function () {
-  if (window.__tbxpmInjected) return;
-  window.__tbxpmInjected = true;
+ (function () {
+   // QWebEngine may reuse the JS world across navigations; use a per-document guard
+   // and always re-bind observers for the current document.
+   try {
+     if (document && document.documentElement && document.documentElement.dataset && document.documentElement.dataset.tbxpmInjected) return;
+     if (document && document.documentElement && document.documentElement.dataset) document.documentElement.dataset.tbxpmInjected = '1';
+   } catch (e) {}
 
   function loadWebChannel(callback) {
     if (window.QWebChannel) {
@@ -524,13 +539,20 @@ void PasswordWebAssistantDialog::injectScripts()
     btn.style.top = '50%';
     btn.style.transform = 'translateY(-50%)';
     btn.style.zIndex = '2147483647';
-    btn.style.padding = '0 6px';
-    btn.style.border = '1px solid #bbb';
-    btn.style.borderRadius = '6px';
-    btn.style.background = '#fff';
-    btn.style.cursor = 'pointer';
-    btn.style.opacity = '0.85';
-    btn.style.fontSize = '12px';
+     // Make the button clearly visible even on the demo page (which styles all <button>).
+     btn.style.margin = '0';
+     btn.style.padding = '0 8px';
+     btn.style.minHeight = '22px';
+     btn.style.lineHeight = '22px';
+     btn.style.border = '1px solid #4338ca';
+     btn.style.borderRadius = '7px';
+     btn.style.background = '#4f46e5';
+     btn.style.color = '#ffffff';
+     btn.style.fontWeight = '600';
+     btn.style.boxShadow = '0 1px 3px rgba(0,0,0,0.25)';
+     btn.style.cursor = 'pointer';
+     btn.style.opacity = '0.95';
+     btn.style.fontSize = '12px';
 
     btn.addEventListener('click', function (ev) {
       ev.preventDefault();
@@ -638,39 +660,63 @@ void PasswordWebAssistantDialog::injectScripts()
     }
   }
 
+   function ensureScanLoop() {
+     scan();
+     try {
+       if (window.__tbxpmObserver && window.__tbxpmObserverDoc === document.documentElement) return;
+       if (window.__tbxpmObserver) window.__tbxpmObserver.disconnect();
+     } catch (e) {}
+     try {
+       var obs = new MutationObserver(function () { scan(); });
+       obs.observe(document.documentElement, { childList: true, subtree: true });
+       window.__tbxpmObserver = obs;
+       window.__tbxpmObserverDoc = document.documentElement;
+     } catch (e) {}
+   }
+
+  // Always attach the button even if WebChannel isn't ready (CSP, timing, etc.).
+  ensureScanLoop();
+
   loadWebChannel(function () {
-    new QWebChannel(qt.webChannelTransport, function (channel) {
-      window.tbxBridge = channel.objects.tbxBridge;
-      if (window.tbxBridge && window.tbxBridge.fillCredentials) {
-        window.tbxBridge.fillCredentials.connect(function (username, password) {
-          var pwdInput = window.__tbxpmLastPasswordInput || document.querySelector('input[type="password"]');
-          if (pwdInput) {
-            setValue(pwdInput, password || '');
-
-            try {
-              var ac = (pwdInput.getAttribute('autocomplete') || '').toLowerCase();
-              if (ac === 'new-password') {
-                var form = pwdInput.form || pwdInput.closest('form');
-                var pwds = passwordInputsIn(form);
-                for (var i = 0; i < pwds.length; i++) {
-                  var p = pwds[i];
-                  if (!p || p === pwdInput) continue;
-                  var pac = (p.getAttribute('autocomplete') || '').toLowerCase();
-                  if (pac === 'new-password') setValue(p, password || '');
-                }
-              }
-            } catch (e) {}
-
-            var userInput = findUsernameInput(pwdInput);
-            if (userInput && username) setValue(userInput, username);
-          }
-        });
+    try {
+      if (!(window.qt && window.qt.webChannelTransport)) {
+        ensureScanLoop();
+        return;
       }
 
-      scan();
-      var obs = new MutationObserver(function () { scan(); });
-      obs.observe(document.documentElement, { childList: true, subtree: true });
-    });
+      new QWebChannel(window.qt.webChannelTransport, function (channel) {
+        window.tbxBridge = channel.objects.tbxBridge;
+        if (window.tbxBridge && window.tbxBridge.fillCredentials) {
+          window.tbxBridge.fillCredentials.connect(function (username, password) {
+            var pwdInput = window.__tbxpmLastPasswordInput || document.querySelector('input[type="password"]');
+            if (pwdInput) {
+              setValue(pwdInput, password || '');
+
+              try {
+                var ac = (pwdInput.getAttribute('autocomplete') || '').toLowerCase();
+                if (ac === 'new-password') {
+                  var form = pwdInput.form || pwdInput.closest('form');
+                  var pwds = passwordInputsIn(form);
+                  for (var i = 0; i < pwds.length; i++) {
+                    var p = pwds[i];
+                    if (!p || p === pwdInput) continue;
+                    var pac = (p.getAttribute('autocomplete') || '').toLowerCase();
+                    if (pac === 'new-password') setValue(p, password || '');
+                  }
+                }
+              } catch (e) {}
+
+              var userInput = findUsernameInput(pwdInput);
+              if (userInput && username) setValue(userInput, username);
+            }
+          });
+        }
+
+        ensureScanLoop();
+      });
+    } catch (e) {
+      ensureScanLoop();
+    }
   });
 })();
     )JS");
